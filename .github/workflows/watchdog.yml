@@ -1,0 +1,88 @@
+name: 5. Watchdog TestFlight
+run-name: Watchdog TestFlight (${{ github.ref_name }})
+
+# Corre en Linux a propósito: no depende de la disponibilidad de runners
+# macOS (que llevamos días viendo saturados). Solo MIRA la fecha del último
+# build real en TestFlight y avisa por Telegram si se acerca a los 90 días.
+# No compila nada él mismo -- esa es la responsabilidad de build_xdrip.yml
+# (nube) y de la red de seguridad local en el Mac.
+
+on:
+  schedule:
+    - cron: '0 9 * * *' # cada día a las 09:00 UTC
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comprobar antigüedad del último build en TestFlight
+        id: check
+        env:
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          APP_ID: "6836761602"
+        run: |
+          gem install jwt --no-document > /dev/null
+          ruby -e '
+            require "jwt"
+            require "openssl"
+            require "net/http"
+            require "json"
+            require "time"
+
+            private_key = OpenSSL::PKey.read(ENV["FASTLANE_KEY"])
+            payload = {
+              iss: ENV["FASTLANE_ISSUER_ID"],
+              iat: Time.now.to_i,
+              exp: Time.now.to_i + 1200,
+              aud: "appstoreconnect-v1"
+            }
+            header = { kid: ENV["FASTLANE_KEY_ID"], typ: "JWT" }
+            token = JWT.encode(payload, private_key, "ES256", header)
+
+            uri = URI("https://api.appstoreconnect.apple.com/v1/builds?filter[app]=#{ENV["APP_ID"]}&sort=-uploadedDate&limit=1")
+            req = Net::HTTP::Get.new(uri)
+            req["Authorization"] = "Bearer #{token}"
+            res = Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) { |http| http.request(req) }
+            body = JSON.parse(res.body)
+            build = body["data"]&.first
+
+            github_output = File.open(ENV["GITHUB_OUTPUT"], "a")
+
+            if build.nil?
+              github_output.puts("days=unknown")
+            else
+              uploaded = Time.parse(build.dig("attributes", "uploadedDate"))
+              days = ((Time.now - uploaded) / 86400).to_i
+              github_output.puts("days=#{days}")
+            end
+            github_output.close
+          '
+
+      - name: Avisar por Telegram si se acerca la caducidad
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DAYS: ${{ steps.check.outputs.days }}
+        run: |
+          if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "Telegram no configurado, me salto el aviso."
+            exit 0
+          fi
+
+          if [ "$DAYS" = "unknown" ]; then
+            MSG="🚨 xDrip Pedro: el vigilante no ha podido ni encontrar un build en TestFlight (o ha fallado la consulta a Apple). Revisa App Store Connect cuanto antes."
+          elif [ "$DAYS" -ge 75 ]; then
+            MSG="🚨 xDrip Pedro: el último build de TestFlight tiene $DAYS días (caduca a los 90). Ni GitHub Actions ni tu Mac lo han renovado todavía. Actúa YA: enciende tu Mac (la red de seguridad local debería activarse) o pide a Claude que lo compile."
+          elif [ "$DAYS" -ge 60 ]; then
+            MSG="⚠️ xDrip Pedro: el último build de TestFlight tiene $DAYS días (caduca a los 90). Debería renovarse solo en las próximas semanas, pero empieza a vigilarlo."
+          else
+            echo "Todo en orden ($DAYS días desde el último build), sin avisar."
+            exit 0
+          fi
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode text="$MSG"
