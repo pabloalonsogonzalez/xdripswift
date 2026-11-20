@@ -1,0 +1,54 @@
+name: TEST temporal - disponibilidad de runners macOS
+run-name: Test disponibilidad runners (${{ github.ref_name }})
+
+# Workflow TEMPORAL, solo para medir si una ventana de menos tráfico
+# (madrugada de domingo, hora europea) consigue runners macOS sin la cola de
+# 15-30 min que llevamos sufriendo en horario laboral. No forma parte del
+# pipeline real -- se puede borrar después de la prueba.
+#
+# Prueba en paralelo los tres runners que nos importan:
+#   - macos-15: el que usa la comunidad Loop/Trio/xDrip4iOS por defecto
+#   - macos-13: al que nos pasamos ayer (Intel, pool distinto) para los jobs ligeros
+#   - macos-26: el que usa el build real (el único que no se puede cambiar,
+#     necesita Xcode moderno)
+
+on:
+  schedule:
+    - cron: '0 3 * * 0' # domingo 03:00 UTC (04:00 CET) -- madrugada, baja carga
+  workflow_dispatch:
+
+jobs:
+  test-runner:
+    name: Probar ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-13, macos-26]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Confirmar que el runner ha arrancado
+        run: |
+          echo "✅ ${{ matrix.runner }} ha arrancado a las $(date -u +%H:%M:%S) UTC"
+          sw_vers
+
+  notify:
+    name: Avisar resultado por Telegram
+    needs: test-runner
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enviar resumen
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RESULT: ${{ needs.test-runner.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "Telegram no configurado."
+            exit 0
+          fi
+          MSG="🧪 xDrip Pedro: test de disponibilidad de runners macOS en ventana de madrugada terminado (resultado global: $RESULT). Mira el detalle por runner (macos-15 / macos-13 / macos-26) aquí: $RUN_URL"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode text="$MSG"
