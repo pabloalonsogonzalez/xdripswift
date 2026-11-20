@@ -264,3 +264,44 @@ jobs:
           path: |
             artifacts
             buildlog
+
+  # Sends a Telegram message only when there is something worth knowing:
+  # a new build went out, or something failed. Stays silent on routine
+  # "checked, nothing changed" weeks.
+  notify:
+    name: Notify Telegram
+    needs: [validate, check_alive_and_permissions, check_latest_from_upstream, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine status and notify
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          PERMISSIONS_RESULT: ${{ needs.check_alive_and_permissions.result }}
+          SYNC_RESULT: ${{ needs.check_latest_from_upstream.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "TELEGRAM_TOKEN/TELEGRAM_CHAT_ID no configurados, me salto el aviso."
+            exit 0
+          fi
+
+          if [ "$VALIDATE_RESULT" = "failure" ]; then
+            MSG="❌ xDrip Pedro: los 6 secrets (certificados/API key) ya no son válidos. Nada se ha compilado. Revisa: $RUN_URL"
+          elif [ "$PERMISSIONS_RESULT" = "failure" ] || [ "$SYNC_RESULT" = "failure" ]; then
+            MSG="⚠️ xDrip Pedro: fallo comprobando permisos del token de GitHub o sincronizando con el repo original. No se ha intentado compilar esta vez. Revisa: $RUN_URL"
+          elif [ "$BUILD_RESULT" = "success" ]; then
+            MSG="✅ xDrip Pedro: nuevo build compilado y subido a TestFlight. Como tiene actualizaciones automáticas activadas, le llegará solo, sin que tengas que hacer nada."
+          elif [ "$BUILD_RESULT" = "failure" ]; then
+            MSG="❌ xDrip Pedro: ha fallado la compilación o la subida a TestFlight. El build anterior de tu suegro sigue funcionando igual, así que NO es urgente, pero convendría revisarlo pronto: $RUN_URL . Si no se soluciona solo en el siguiente intento programado, dile a Claude que lo compile en local (ya se hizo así una vez y funcionó)."
+          else
+            echo "Nada que notificar esta vez (sin cambios que compilar, o no tocaba build mensual)."
+            exit 0
+          fi
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode text="$MSG"
