@@ -282,6 +282,7 @@ jobs:
           VALIDATE_RESULT: ${{ needs.validate.result }}
           PERMISSIONS_RESULT: ${{ needs.check_alive_and_permissions.result }}
           SYNC_RESULT: ${{ needs.check_latest_from_upstream.result }}
+          NEW_COMMITS: ${{ needs.check_latest_from_upstream.outputs.NEW_COMMITS }}
           BUILD_RESULT: ${{ needs.build.result }}
         run: |
           if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
@@ -292,9 +293,11 @@ jobs:
           if [ "$VALIDATE_RESULT" = "failure" ]; then
             MSG="❌ xDrip Pedro: los 6 secrets (certificados/API key) ya no son válidos. Nada se ha compilado. Revisa: $RUN_URL"
           elif [ "$PERMISSIONS_RESULT" = "failure" ] || [ "$SYNC_RESULT" = "failure" ]; then
-            MSG="⚠️ xDrip Pedro: fallo comprobando permisos del token de GitHub o sincronizando con el repo original. No se ha intentado compilar esta vez. Revisa: $RUN_URL"
+            MSG="⚠️ xDrip Pedro: fallo comprobando permisos del token de GitHub o sincronizando con el repo original (JohanDegraeve/xdripswift). No se ha intentado compilar esta vez. Revisa: $RUN_URL"
+          elif [ "$BUILD_RESULT" = "success" ] && [ "$NEW_COMMITS" = "true" ]; then
+            MSG="🆕 xDrip Pedro: ¡hay una versión nueva de verdad! Se han detectado cambios en el repo original (JohanDegraeve/xdripswift), se han sincronizado con tu fork sin problemas, y ya se ha compilado y subido a TestFlight. Le llegará solo a tu suegro (actualizaciones automáticas activadas), no tienes que hacer nada."
           elif [ "$BUILD_RESULT" = "success" ]; then
-            MSG="✅ xDrip Pedro: nuevo build compilado y subido a TestFlight. Como tiene actualizaciones automáticas activadas, le llegará solo, sin que tengas que hacer nada."
+            MSG="✅ xDrip Pedro: build de renovación subido a TestFlight (sin cambios de código nuevos del repo original — es solo el refresco programado para que el build no llegue a caducar a los 90 días). Le llegará solo a tu suegro."
           elif [ "$BUILD_RESULT" = "failure" ]; then
             MSG="❌ xDrip Pedro: ha fallado la compilación o la subida a TestFlight. El build anterior de tu suegro sigue funcionando igual, así que NO es urgente, pero convendría revisarlo pronto: $RUN_URL . Si no se soluciona solo en el siguiente intento programado, dile a Claude que lo compile en local (ya se hizo así una vez y funcionó)."
           else
