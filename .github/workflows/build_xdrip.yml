@@ -7,8 +7,12 @@ on:
   #push:
   
   schedule:
-    - cron: '0 8 * * 3' # Checks for updates at 08:00 UTC every Wednesday
-    - cron: '0 6 1 * *' # Builds the app on the 1st of every month at 06:00 UTC
+    # Domingos de madrugada: entre semana los runners macOS arm64 de GitHub
+    # están saturados y cancelan el job a los 15 min sin máquina (visto el
+    # 19/11 y el 24/11/2026); el domingo 22/11 arrancaron en segundos.
+    # Cada domingo comprueba cambios upstream; el primer domingo de cada mes
+    # compila siempre (ver output MONTHLY más abajo).
+    - cron: '0 2 * * 0' # domingo 02:00 UTC
 
 env:
   UPSTREAM_REPO: JohanDegraeve/xdripswift
@@ -91,8 +95,18 @@ jobs:
     name: Check upstream and keep alive
     outputs: 
       NEW_COMMITS: ${{ steps.sync.outputs.has_new_commits }}
+      MONTHLY: ${{ steps.monthly.outputs.monthly }}
     
     steps:
+    - name: Is this the monthly build (first Sunday of the month)?
+      id: monthly
+      run: |
+        if [ "${{ github.event_name }}" = "schedule" ] && [ "$(date -u +%-d)" -le 7 ]; then
+          echo "monthly=true" >> $GITHUB_OUTPUT
+        else
+          echo "monthly=false" >> $GITHUB_OUTPUT
+        fi
+    
     - name: Checkout target repo
       if: |
         needs.check_alive_and_permissions.outputs.WORKFLOW_PERMISSION == 'true' &&
@@ -164,7 +178,7 @@ jobs:
     if: | # runs if started manually, or if sync schedule is set and enabled and scheduled on the first Saturday each month, or if sync schedule is set and enabled and new commits were found
         github.event_name == 'workflow_dispatch' ||
         (needs.check_alive_and_permissions.outputs.WORKFLOW_PERMISSION == 'true' &&
-          (vars.SCHEDULED_BUILD != 'false' && github.event.schedule == '0 6 1 * *') ||
+          (vars.SCHEDULED_BUILD != 'false' && needs.check_latest_from_upstream.outputs.MONTHLY == 'true') ||
           (vars.SCHEDULED_SYNC != 'false' && needs.check_latest_from_upstream.outputs.NEW_COMMITS == 'true' )
         )
     steps:
@@ -297,14 +311,22 @@ jobs:
           # preocupa.
           is_bad() { [ "$1" = "failure" ] || [ "$1" = "cancelled" ] || [ "$1" = "timed_out" ]; }
 
+          # Si algo se ha cancelado (casi siempre: sin runner macOS en 15 min)
+          # y aún quedan reintentos, retry_build.yml lo relanzará solo. No
+          # molestamos por Telegram hasta el último intento.
+          if [ "${{ github.run_attempt }}" -lt 3 ] && echo "$VALIDATE_RESULT $PERMISSIONS_RESULT $SYNC_RESULT $BUILD_RESULT" | grep -q cancelled; then
+            echo "Cancelado en el intento ${{ github.run_attempt }}; se reintentará automáticamente. Sin aviso."
+            exit 0
+          fi
+
           if is_bad "$VALIDATE_RESULT"; then
             MSG="❌ xDrip Pedro: la comprobación de secrets/certificados no ha terminado bien (resultado: $VALIDATE_RESULT). Esto incluye que GitHub haya cancelado el job por falta de runners macOS disponibles, algo que nos ha pasado varias veces estos días. Nada se ha compilado esta vez. El build anterior de tu suegro sigue intacto, no es urgente, pero revísalo: $RUN_URL . Si se repite varias veces seguidas, dile a Claude que lo compile en local (plan B ya probado y que funciona)."
           elif is_bad "$PERMISSIONS_RESULT" || is_bad "$SYNC_RESULT"; then
             MSG="⚠️ xDrip Pedro: fallo (o cancelación por falta de runners) comprobando permisos del token de GitHub o sincronizando con el repo original (JohanDegraeve/xdripswift). No se ha intentado compilar esta vez. Revisa: $RUN_URL"
           elif [ "$BUILD_RESULT" = "success" ] && [ "$NEW_COMMITS" = "true" ]; then
-            MSG="🆕 xDrip Pedro: ¡hay una versión nueva de verdad! Se han detectado cambios en el repo original (JohanDegraeve/xdripswift), se han sincronizado con tu fork sin problemas, y ya se ha compilado y subido a TestFlight. Le llegará solo a tu suegro (actualizaciones automáticas activadas), no tienes que hacer nada."
+            MSG="🆕 xDrip Pedro: ¡hay una versión nueva de verdad! Se han detectado cambios en el repo original (JohanDegraeve/xdripswift), se han sincronizado con tu fork sin problemas, y ya se ha compilado y subido a TestFlight. OJO: la actualización automática de TestFlight no está funcionando, así que pídele a tu suegro que abra TestFlight y pulse 'Actualizar' en xDrip Pedro (o hazlo tú con su móvil)."
           elif [ "$BUILD_RESULT" = "success" ]; then
-            MSG="✅ xDrip Pedro: build de renovación subido a TestFlight (sin cambios de código nuevos del repo original — es solo el refresco programado para que el build no llegue a caducar a los 90 días). Le llegará solo a tu suegro."
+            MSG="✅ xDrip Pedro: build de renovación subido a TestFlight (sin cambios de código nuevos del repo original — es solo el refresco programado para que el build no llegue a caducar a los 90 días). OJO: la actualización automática de TestFlight no está funcionando, así que pídele a tu suegro que abra TestFlight y pulse 'Actualizar' en xDrip Pedro (o hazlo tú con su móvil). Lo importante es que lo haga al menos una vez antes de que caduque la versión que tiene instalada."
           elif is_bad "$BUILD_RESULT"; then
             MSG="❌ xDrip Pedro: la compilación o la subida a TestFlight no ha terminado bien (resultado: $BUILD_RESULT) — puede ser un fallo real o que GitHub haya cancelado el job por falta de runners macOS disponibles (nos ha pasado varias veces). El build anterior de tu suegro sigue funcionando igual, así que NO es urgente, pero convendría revisarlo pronto: $RUN_URL . Si no se soluciona solo en el siguiente intento programado, dile a Claude que lo compile en local (ya se hizo así una vez y funcionó, tarda unos 20 min)."
           else

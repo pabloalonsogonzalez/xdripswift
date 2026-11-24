@@ -1,0 +1,36 @@
+name: 6. Reintentar build cancelado
+run-name: Reintentar build (${{ github.event.workflow_run.run_attempt }}/3)
+
+# Los runners macOS arm64 de GitHub se saturan y GitHub cancela el job si no
+# consigue máquina en 15 min ("The job was not acquired by Runner of type
+# hosted even after multiple attempts"). Cuando el build termina con algún job
+# CANCELADO (no con un fallo real de compilación), esperamos un rato y lo
+# relanzamos, hasta 3 intentos en total. Este workflow corre en Linux.
+
+on:
+  workflow_run:
+    workflows: ["4. Build xDrip4iOS"]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  retry:
+    if: github.event.workflow_run.conclusion != 'success' && github.event.workflow_run.run_attempt < 3
+    runs-on: ubuntu-latest
+    steps:
+      - name: Relanzar si algún job se canceló por falta de runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          CANCELLED=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" --jq '[.jobs[] | select(.conclusion=="cancelled")] | length')
+          if [ "$CANCELLED" = "0" ]; then
+            echo "Fallo real (no cancelación), no reintento."
+            exit 0
+          fi
+          echo "$CANCELLED job(s) cancelados. Espero 30 min a que baje la cola y relanzo."
+          sleep 1800
+          gh run rerun "$RUN_ID" --repo "$REPO"
