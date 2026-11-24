@@ -59,6 +59,38 @@ jobs:
               github_output.puts("days=#{days}")
             end
             github_output.close
+
+            # --- Caducidad de lo que hay INSTALADO (no solo de lo subido) ---
+            # La actualización automática de TestFlight no funciona, así que
+            # un build nuevo subido no garantiza que el móvil de nadie lo tenga.
+            # Apple da installCount acumulado por build (betaBuildUsages), no
+            # "qué build tiene cada tester ahora". Regla conservadora:
+            #   recorremos builds vigentes de más nuevo a más viejo; todo build
+            #   con instalaciones puede estar en uso, salvo que un build MÁS
+            #   NUEVO tenga instalaciones >= nº de testers (todos actualizaron).
+            # Avisamos por el que caduque antes.
+            def api(path, token)
+              u = URI("https://api.appstoreconnect.apple.com#{path}")
+              r = Net::HTTP::Get.new(u); r["Authorization"] = "Bearer #{token}"
+              JSON.parse(Net::HTTP.start(u.hostname, u.port, use_ssl: true) { |h| h.request(r) }.body)
+            end
+            testers = (api("/v1/betaTesters?filter[apps]=#{ENV["APP_ID"]}&limit=200", token)["data"] || []).size
+            builds = api("/v1/builds?filter[app]=#{ENV["APP_ID"]}&filter[expired]=false&sort=-uploadedDate&limit=20", token)["data"] || []
+            worst = nil
+            builds.each do |b|
+              m = api("/v1/builds/#{b["id"]}/metrics/betaBuildUsages", token)
+              installs = (m.dig("data", 0, "dataPoints") || []).sum { |dp| dp.dig("values", "installCount").to_i }
+              next if installs == 0
+              left = ((Time.parse(b.dig("attributes", "expirationDate")) - Time.now) / 86400).to_i
+              puts "build #{b.dig("attributes", "version")}: #{installs} instalaciones, caduca en #{left} días"
+              worst = [left, b.dig("attributes", "version")] if worst.nil? || left <= worst[0]
+              break if testers > 0 && installs >= testers
+            end
+            puts "testers: #{testers}"
+            File.open(ENV["GITHUB_OUTPUT"], "a") do |f|
+              f.puts("installed_days_left=#{worst ? worst[0] : "unknown"}")
+              f.puts("installed_build=#{worst ? worst[1] : "?"}")
+            end
           '
 
       - name: Avisar por Telegram si se acerca la caducidad
@@ -66,12 +98,30 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DAYS: ${{ steps.check.outputs.days }}
+          LEFT: ${{ steps.check.outputs.installed_days_left }}
+          INSTALLED_BUILD: ${{ steps.check.outputs.installed_build }}
         run: |
           if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
             echo "Telegram no configurado, me salto el aviso."
             exit 0
           fi
 
+          send() {
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode text="$1"
+          }
+
+          # Aviso 1: caducidad de lo INSTALADO en los móviles
+          if [ "$LEFT" = "unknown" ]; then
+            send "🚨 xDrip Pedro: el vigilante no encuentra ningún build vigente instalado en TestFlight. Puede que la app ya haya caducado en el móvil de tu suegro. Revísalo YA."
+          elif [ "$LEFT" -le 15 ]; then
+            send "🚨 xDrip Pedro: el build $INSTALLED_BUILD, que puede seguir instalado en algún móvil, caduca en $LEFT días. Pídele a tu suegro que abra TestFlight y pulse 'Actualizar' en xDrip Pedro (y hazlo tú también en tu móvil)."
+          elif [ "$LEFT" -le 30 ]; then
+            send "⚠️ xDrip Pedro: el build $INSTALLED_BUILD, que puede seguir instalado en algún móvil, caduca en $LEFT días. Cuando puedas, que tu suegro pulse 'Actualizar' en TestFlight (y tú también en tu móvil, para que el aviso deje de saltar)."
+          fi
+
+          # Aviso 2: antigüedad del último build SUBIDO (lo que ya había)
           if [ "$DAYS" = "unknown" ]; then
             MSG="🚨 xDrip Pedro: el vigilante no ha podido ni encontrar un build en TestFlight (o ha fallado la consulta a Apple). Revisa App Store Connect cuanto antes."
           elif [ "$DAYS" -ge 75 ]; then
@@ -79,10 +129,8 @@ jobs:
           elif [ "$DAYS" -ge 60 ]; then
             MSG="⚠️ xDrip Pedro: el último build de TestFlight tiene $DAYS días (caduca a los 90). Debería renovarse solo en las próximas semanas, pero empieza a vigilarlo."
           else
-            echo "Todo en orden ($DAYS días desde el último build), sin avisar."
+            echo "Último build subido en orden ($DAYS días)."
             exit 0
           fi
 
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
-            -d chat_id="${TELEGRAM_CHAT_ID}" \
-            --data-urlencode text="$MSG"
+          send "$MSG"
